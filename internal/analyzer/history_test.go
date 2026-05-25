@@ -173,3 +173,59 @@ func TestExtractMetadata(t *testing.T) {
 		t.Errorf("User = %q, want nginx", meta.User)
 	}
 }
+
+func TestIsScratchImage_Explicit(t *testing.T) {
+	cfg := &v1.ConfigFile{
+		History: []v1.History{
+			{CreatedBy: "FROM scratch", EmptyLayer: true},
+			{CreatedBy: "COPY myapp /usr/local/bin/myapp", EmptyLayer: false},
+			{CreatedBy: "CMD [\"myapp\"]", EmptyLayer: true},
+		},
+	}
+	if !isScratchImage(cfg) {
+		t.Error("expected isScratchImage=true for explicit FROM scratch")
+	}
+}
+
+func TestIsScratchImage_CopyFirst(t *testing.T) {
+	cfg := &v1.ConfigFile{
+		History: []v1.History{
+			{CreatedBy: "COPY myapp /usr/local/bin/myapp", EmptyLayer: false},
+			{CreatedBy: "EXPOSE 8080", EmptyLayer: true},
+		},
+	}
+	if !isScratchImage(cfg) {
+		t.Error("expected isScratchImage=true when first entry is COPY")
+	}
+}
+
+func TestIsScratchImage_NormalBase(t *testing.T) {
+	cfg := &v1.ConfigFile{
+		History: []v1.History{
+			{CreatedBy: "/bin/sh -c #(nop) ENV PATH=/usr/bin:/bin", EmptyLayer: true},
+			{CreatedBy: "/bin/sh -c #(nop) LABEL maintainer=test", EmptyLayer: true},
+			{CreatedBy: "/bin/sh -c apk add --no-cache curl", EmptyLayer: false},
+		},
+	}
+	if isScratchImage(cfg) {
+		t.Error("expected isScratchImage=false for normal base image")
+	}
+}
+
+func TestExtractMetadata_Scratch(t *testing.T) {
+	cfg := &v1.ConfigFile{
+		History: []v1.History{
+			{CreatedBy: "FROM scratch", EmptyLayer: true},
+			{CreatedBy: "COPY myapp /", EmptyLayer: false},
+		},
+		Config: v1.Config{
+			Cmd: []string{"/myapp"},
+		},
+	}
+	img := empty.Image
+	meta := ExtractMetadata(cfg, "myapp:v1", img)
+
+	if meta.BaseImageRef != "scratch" {
+		t.Errorf("BaseImageRef = %q, want scratch", meta.BaseImageRef)
+	}
+}

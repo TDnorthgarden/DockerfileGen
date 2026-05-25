@@ -28,6 +28,14 @@ func ExtractMetadata(cfg *v1.ConfigFile, imageRef string, img v1.Image) model.Im
 		BaseImageRef: imageRef,
 	}
 
+	// Detect FROM scratch: check if history explicitly contains "FROM scratch"
+	// or if the image has no base image indicators
+	if isScratchImage(cfg) {
+		meta.BaseImageRef = "scratch"
+	} else if digest, err := img.Digest(); err == nil {
+		meta.BaseImageRef = fmt.Sprintf("%s@%s", imageRef, digest.String())
+	}
+
 	meta.EnvVars = make(map[string]string)
 	for _, e := range cfg.Config.Env {
 		if idx := strings.IndexByte(e, '='); idx >= 0 {
@@ -56,11 +64,47 @@ func ExtractMetadata(cfg *v1.ConfigFile, imageRef string, img v1.Image) model.Im
 	}
 	sort.Strings(meta.Volumes)
 
-	if digest, err := img.Digest(); err == nil {
-		meta.BaseImageRef = fmt.Sprintf("%s@%s", imageRef, digest.String())
+	return meta
+}
+
+// isScratchImage checks if the image was built FROM scratch.
+// Detection: history contains explicit "FROM scratch", or the first real history
+// entry is a filesystem operation (COPY/ADD/RUN) with no prior base image metadata.
+func isScratchImage(cfg *v1.ConfigFile) bool {
+	if len(cfg.History) == 0 {
+		return false
 	}
 
-	return meta
+	// Check for explicit "FROM scratch" in history
+	for _, h := range cfg.History {
+		created := strings.TrimSpace(h.CreatedBy)
+		upper := strings.ToUpper(created)
+		if upper == "FROM SCRATCH" || strings.HasPrefix(upper, "FROM SCRATCH") {
+			return true
+		}
+	}
+
+	// Heuristic: if the first non-empty history entry is a filesystem operation
+	// (COPY, ADD, RUN) rather than metadata from a base image, it's likely scratch.
+	// Base images typically start with ENV/LABEL entries inherited from their parent.
+	for _, h := range cfg.History {
+		if h.CreatedBy == "" {
+			continue
+		}
+		inst := parseCreatedBy(h.CreatedBy)
+		if inst == nil {
+			continue
+		}
+		// First real instruction is a filesystem op — likely scratch
+		switch inst.Type {
+		case model.InstCOPY, model.InstADD, model.InstRUN:
+			return true
+		default:
+			return false
+		}
+	}
+
+	return false
 }
 
 // ParseHistory converts image history entries into ordered instructions.
